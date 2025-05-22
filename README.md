@@ -2,7 +2,7 @@
 
 Metascheduler for TPV as Service
 
-The TPV Metascheduler is an API that plugs in to [TPV](https://total-perspective-vortex.readthedocs.io/en/latest/)s' [rank](https://total-perspective-vortex.readthedocs.io/en/latest/topics/concepts.html#rank) function: 
+The TPV Broker is an API that plugs in to [TPV](https://total-perspective-vortex.readthedocs.io/en/latest/)s' [rank](https://total-perspective-vortex.readthedocs.io/en/latest/topics/concepts.html#rank) function: 
 > After the matching destinations are short listed, they are ranked using a pluggable rank function. The default rank function simply sorts the destinations by tags that have the most number of preferred tags, with a penalty if preferred tags are absent. However, this default rank function can be overridden per entity, allowing a custom rank function to be defined in python code, with arbitrary logic for picking the best match from the available candidate destinations.
 
 The API takes the list of `candidate_destinations`, i.e., destinations registered in TPV (with hardcoded resource usage limits, such as the max memory allowed for a job) which can in theory statify the job requirements, eg:
