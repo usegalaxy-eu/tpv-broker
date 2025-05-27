@@ -1,6 +1,88 @@
 global:
   default_inherits: default
 
+users:
+  esg_users:
+    abstract: true
+    params:
+    scheduling:
+      prefer:
+        - be-pulsar
+        - sanjay-pulsar
+        - de-pulsar
+        - cz-pulsar
+        - it-pulsar
+        - sp-pulsar
+        - uk-pulsar
+        - tr-pulsar
+        - nor-pulsar
+        - pl-pulsar
+        - ch-pulsar
+        - sl-pulsar
+    rank: |
+      import sys
+      import requests
+      import json
+      import pathlib
+      from ruamel.yaml import YAML
+      import logging
+    
+      # Set up logging
+      logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)                       
+      log = logging.getLogger(__name__)
+        
+      # Load static objectstore info 
+      # NOTE: currently object store info is stored in a yaml
+      objectstore_loc_path = "{{ tpv_config_dir }}/object_store_locations.yml"
+      dataset_attributes = helpers.get_dataset_attributes(job.input_datasets)
+
+      yaml=YAML(typ='safe')
+      objectstore_file = pathlib.Path(objectstore_loc_path)
+      objectstore_dict = yaml.load(objectstore_file)
+
+      # Format the destination data
+      candidate_destinations_list = [{"id": dest.id, **dest.context} for dest in candidate_destinations if dest.context and 'latitude' in dest.context and 'longitude' in dest.context]
+      log.debug(f"candidate_destinations_list: {candidate_destinations_list}")
+      
+      # Static job info
+      if not entity.gpus:
+        gpus = 0
+      job_info = {"tool_id": tool.id, "mem": mem, "cores": cores, "gpus": gpus,}
+
+      # URL of the FastAPI application
+      api_url = "https://test.usegalaxy.be/tpv-api/process_data"
+
+      input_data = {
+        "destinations": candidate_destinations_list,
+        "objectstores": objectstore_dict,
+        "datasets": dataset_attributes,
+        "job_info": job_info,
+      }
+
+      # Send a POST request to the API endpoint
+      response = requests.post(api_url, json=input_data)
+
+      # Check if the request was successful (status code 200)
+      if response.status_code == 200:
+          result = response.json()
+      else:
+          log.debug(f"Request failed with status code {response.status_code}: {response.text}")
+          print(f"Request failed with status code {response.status_code}: {response.text}")
+
+      log.debug(f"sorted destinations: {result}")
+      # log.debug(f"cand destinations: {[dest.id for dest in candidate_destinations]}")
+      # Sort the candidate destinations based on the sorted_destinations from the result
+      final_destinations = sorted(
+          (dest for dest in candidate_destinations if str(dest.id) in result["sorted_destinations"]),
+          key=lambda obj: result["sorted_destinations"].index(str(obj.id))
+      )
+
+      final_destinations
+
+  padge:
+    inherits: esg_users
+
+
 tools:
   default:
     cores: 2
@@ -15,16 +97,18 @@ tools:
           offline
     rules: []
     rank: |
+      import sys
       import requests
       import json
       import pathlib
       from ruamel.yaml import YAML
-      from galaxy import model
-      from sqlalchemy import select, func
-      from datetime import datetime, timedelta
-
-      sa_session = app.model.context
-
+      import logging
+    
+      # Set up logging
+      logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)                       
+      log = logging.getLogger(__name__)
+        
+      # Load static objectstore info 
       # NOTE: currently object store info is stored in a yaml
       objectstore_loc_path = "{{ tpv_config_dir }}/object_store_locations.yml"
       dataset_attributes = helpers.get_dataset_attributes(job.input_datasets)
@@ -33,60 +117,23 @@ tools:
       objectstore_file = pathlib.Path(objectstore_loc_path)
       objectstore_dict = yaml.load(objectstore_file)
 
-      # URL of local influxDB
-      influx_url = "http://127.0.0.1:8086/query"
+      # Format the destination data latitude': 49.817492, 'longitude
+      candidate_destinations_list = [{"id": dest.id, **dest.context} for dest in candidate_destinations if dest.context and 'latitude' in dest.context and 'longitude' in dest.context]
+      log.debug(f"candidate_destinations_list: {candidate_destinations_list}")
+      
+      # Static job info
+      if not entity.gpus:
+        gpus = 0
+      job_info = {"tool_id": tool.id, "mem": mem, "cores": cores, "gpus": gpus,}
+
       # URL of the FastAPI application
-      api_url = "http://localhost:8000/process_destinations"
-      queries = [
-          "SELECT * FROM \"destination-queue-run-time\"  WHERE time > now() - 30m",
-          "SELECT * FROM \"cluster.queue\" WHERE host = 'vgcn-pulsar-central-manager.usegalaxy.be' LIMIT 6;",
-          "SELECT * FROM \"cluster.alloc\" WHERE host = 'vgcn-pulsar-central-manager.usegalaxy.be' LIMIT 10;",
-      ]
-
-      params = {
-         "db": "telegraf",
-         "q": ";".join(queries)
-      }
-      response = requests.get(influx_url, params=params)
-      results = response.json()
-
-      columns = results['results'][0]['series'][0]['columns']
-      stat_columns = ['destination_id', 'tool_id', 'time', 'count', 'median_queue', 'median_run']
-      stat_indices = [columns.index(c) for c in stat_columns]
-      #stat_indices = [i for i,l in enumerate(columns) if l in stat_columns]
-      series = results['results'][0]['series'][0]['values']
-
-      #condor_status = [zip(results['results'][1]['series'][0]['columns'], row) for row in results['results'][1]['series'][0]['values'])]
-
-      # Format the destination data and identify the total number of queued jobs for each destination
-      candidate_destinations_list = []
-      for dest in candidate_destinations:
-          dest_dict = dest.to_dict()
-          dest_dict["queued_job_count"] = app.model.context.query(model.Job).filter(model.Job.state == "queued", model.Job.destination_id == dest.dest_name).count()
-
-          for row in series:
-              stats = [row[i] for i in stat_indices]
-              if stats[0] == dest.dest_name and stats[1] == job.tool_id:
-                  dest_dict.update(zip(stat_columns,stats))
-                  dest_dict["galaxy_db_query_time"] = dest_dict.pop("time")
-                  dest_dict["job_count_in_time_window"] = dest_dict.pop("count")
-                  dest_dict["median_queue_time"] = dest_dict.pop("median_queue")
-                  dest_dict["median_run_time"] = dest_dict.pop("median_run")
-                  break
-          
-          for row in results['results'][1]['series'][0]['values']:
-              dest_dict[row[-1]+"_count"] = row[1]
-
-          for row in results['results'][2]['series'][0]['values']:
-              dest_dict["cpu_usage_perc"] = row[2]
-              dest_dict["mem_usage_perc"] = row[-1]
-
-          candidate_destinations_list.append(dest_dict)
+      api_url = "https://test.usegalaxy.be/tpv-api/process_data"
 
       input_data = {
         "destinations": candidate_destinations_list,
         "objectstores": objectstore_dict,
-        "dataset_attributes": dataset_attributes
+        "datasets": dataset_attributes,
+        "job_info": job_info,
       }
 
       # Send a POST request to the API endpoint
@@ -96,11 +143,19 @@ tools:
       if response.status_code == 200:
           result = response.json()
       else:
+          log.debug(f"Request failed with status code {response.status_code}: {response.text}")
           print(f"Request failed with status code {response.status_code}: {response.text}")
 
-      final_destinations = sorted(candidate_destinations, key=lambda obj: result["sorted_destinations"].index(str(obj.id)))
+      log.debug(f"sorted destinations: {result}")
+      # log.debug(f"cand destinations: {[dest.id for dest in candidate_destinations]}")
+      # Sort the candidate destinations based on the sorted_destinations from the result
+      final_destinations = sorted(
+          (dest for dest in candidate_destinations if str(dest.id) in result["sorted_destinations"]),
+          key=lambda obj: result["sorted_destinations"].index(str(obj.id))
+      )
 
       final_destinations
+
 
   trinity:
     cores: 2
